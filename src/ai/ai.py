@@ -259,7 +259,7 @@ class AIClient:
         key = cv.waitKey(1) & 0xFF
 
         if key == ord('q') or key == 27:
-            return "quit", drawings
+            return "quit", index, drawings
         elif key == ord('y'):
             self.draw_landmark = not self.draw_landmark
         elif key == ord('x'):
@@ -302,4 +302,4 @@ class AIClient:
             ])
 
 
-        return pose, drawings
+        return pose, index, drawings

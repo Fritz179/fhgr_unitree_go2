@@ -18,6 +18,8 @@ import numpy as np
 import sys
 import time
 
+from pynput import keyboard
+
 def mode_to_str(mode: int) -> str:
     # Mapping based on Go1/Go2 HighCmd docs (not official names, just handy labels)
     return {
@@ -100,7 +102,8 @@ def print_low_state():
         f"  accelerometer= [{acc[0]: .4f}, {acc[1]: .4f}, {acc[2]: .4f}]  # m/s^2\n"
         f"  rpy          = [{rpy[0]: .4f}, {rpy[1]: .4f}, {rpy[2]: .4f}]  # rad\n"
         f"  temperature  = {int(temp)} °C\n"
-        f"  battery      = {battery_percent:.1f}% / {battery_current:.1f}A"
+        ""
+        f"Battery:       = {battery_percent:.1f}% / {battery_current:.1f}A"
     )
     # if you also want battery etc, you can look at msg.power_v / msg.power_a here
 
@@ -108,8 +111,8 @@ def print_low_state():
 from ai.ai import AIClient
 
 if __name__ == "__main__":
-    ChannelFactoryInitialize(0, "wlo1")
-    # ChannelFactoryInitialize(0)
+    # ChannelFactoryInitialize(0, "wlo1")
+    ChannelFactoryInitialize(0)
 
     # https://support.unitree.com/home/en/developer/sports_services
     sport_client = SportClient()
@@ -138,6 +141,50 @@ if __name__ == "__main__":
 
     wait = (20, "reset")
 
+    disabled = False
+    safe_mode = True
+    following = False
+
+    def on_press(key):
+        global disabled, safe_mode, following
+
+        if key == keyboard.Key.space:
+            print(f"Space key pressed, damping the robot")
+            print(f"Please ensure the robot is safe and press Enter to re-enable")
+            disabled = True
+            sport_client.Damp()
+
+        elif key == keyboard.Key.enter:
+            print(f"Enter key pressed, enabling the robot")
+            disabled = False
+            sport_client.BalanceStand()
+
+        elif key == keyboard.Key.ctrl:
+            safe_mode = not safe_mode
+            following = False
+            print(f"Ctrl key pressed, toggling safe mode (currently {'ON' if safe_mode else 'OFF'})")
+
+        elif key == keyboard.Key.shift:
+            if safe_mode:
+                print("Safe mode is ON, cannot enable following mode")
+                return
+            
+            following = not following
+            print(f"Shift key pressed, toggling following mode (currently {'ON' if following else 'OFF'})")
+
+    def reset_pose():
+        # Sometimes the robot needs a bit of a nudge to get back to normal posture
+        sport_client.BalanceStand()
+        cv2.waitKey(1)
+        sport_client.Euler(0, 0, 0)
+        cv2.waitKey(1)
+        sport_client.BalanceStand()
+        cv2.waitKey(1)
+        sport_client.Euler(0, -0.3, 0)
+
+    listener = keyboard.Listener(on_press)
+    listener.start()
+
     window_name = "The Dog"
 
     while True:
@@ -160,17 +207,34 @@ if __name__ == "__main__":
 
         image = cv2.resize(image, (1280, 720))
 
-        action, image = ai_client.update(image)
-
+        action, direction, image = ai_client.update(image)
+        print(f"Detected action: {action}, direction: {direction}")
         
-        code, info = state_client.CheckMode()
+        # code, info = state_client.CheckMode()
         # print(f"Frame: {frame}, Action: {action}, wait: {wait}, Current motion mode: {info}, code: {code}")
         # print_low_state()
         # print_sport_state()
         frame += 1
 
+        if disabled:
+            cv2.putText(image, "Robot Disabled - Press Enter to Enable", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 3)
+
+        if not safe_mode:
+            cv2.putText(image, "Safe Mode OFF", (50, 150), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 3)
+
+        if following:
+            cv2.putText(image, "Following Mode ON", (50, 200), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 0), 3)
+
         # Display image
         cv2.imshow(window_name, image)
+
+        # Press ESC to stop
+        if action == "quit":
+            break
+
+        if disabled:
+            cv2.waitKey(1)
+            continue
 
         """ Available Poses:
             grabbing, grip, holy, point, call, three3, 
@@ -215,20 +279,10 @@ if __name__ == "__main__":
             z, grabbing -> stretch [blocking]
         """
 
-        print(f"Action: {action}, wait: {wait}")
+        # print(f"Action: {action}, wait: {wait}")
 
-        # Press ESC to stop
-        if action == "quit":
-            break
-
-        if action == " ":
-            sport_client.BalanceStand()
-            cv2.waitKey(1)
-            sport_client.Euler(0, -0.3, 0)
-            cv2.waitKey(1)
-            sport_client.BalanceStand()
-            cv2.waitKey(1)
-            sport_client.Euler(0, -0.3, 0)
+        if action == ".":
+            reset_pose()
             wait = (0, "done")
             continue
 
@@ -256,12 +310,7 @@ if __name__ == "__main__":
                 wait = (10, "reset")
             elif action == "reset":
                 print("Resetting posture")
-                sport_client.BalanceStand()
-                cv2.waitKey(1)
-                sport_client.Euler(0, -0.3, 0)
-                cv2.waitKey(1)
-                sport_client.BalanceStand()
-                cv2.waitKey(1)
+                reset_pose()
                 sport_client.Euler(0, -0.3, 0)
 
             continue
@@ -295,16 +344,28 @@ if __name__ == "__main__":
             sport_client.Content()  # Blocking call
 
         elif action == "like" or action == "j":
+            if safe_mode:
+                print("Safe mode is ON, skipping WalkUpright command")
+                continue
+
             cv2.waitKey(1)
             sport_client.WalkUpright(True)
             wait = (50, "walk_upright_off")
 
         elif action == "dislike" or action == "k":
+            if safe_mode:
+                print("Safe mode is ON, skipping HandStand command")
+                continue
+
             cv2.waitKey(1)
             sport_client.HandStand(True)
             wait = (50, "hand_stand_off")
 
         elif action == "three_gun" or action == "l":
+            if safe_mode:
+                print("Safe mode is ON, skipping LeftFlip command")
+                continue
+
             cv2.waitKey(1)
             sport_client.LeftFlip()  # Blocking call
             wait = (20, "reset")
@@ -328,6 +389,10 @@ if __name__ == "__main__":
             sport_client.FrontPounce()
 
         elif action == "peace_inverted" or action == "t":
+            if safe_mode:
+                print("Safe mode is ON, skipping FrontJump command")
+                continue
+
             cv2.waitKey(1)
             sport_client.FrontJump()
 
@@ -338,7 +403,13 @@ if __name__ == "__main__":
         elif action != "no_gesture" and action != None:
             print(f"Unknown action: {action}")
 
+        else:
+            cv2.waitKey(1)
+            sport_client.Euler(0, -0.3, 0)
+            continue
 
+    listener.stop()
+    listener.join()
 
     cv2.destroyWindow(window_name)
 
