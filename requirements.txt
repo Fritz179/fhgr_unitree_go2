@@ -1,0 +1,5 @@
+cyclonedds == 0.10.2
+numpy
+opencv-python
+ultralytics
+mediapipe
