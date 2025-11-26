@@ -11,12 +11,11 @@ from unitree_sdk2_python.unitree_sdk2py.go2.video.video_client import VideoClien
 from unitree_sdk2_python.unitree_sdk2py.go2.sport.sport_client import SportClient
 from unitree_sdk2_python.unitree_sdk2py.comm.motion_switcher.motion_switcher_client import MotionSwitcherClient
 
-from unitree_sdk2_python.unitree_sdk2py.idl.unitree_go.msg.dds_ import LowState_, IMUState_, BmsState_, SportModeState_
+from unitree_sdk2_python.unitree_sdk2py.idl.unitree_go.msg.dds_ import LowState_, IMUState_, BmsState_, SportModeState_, UwbState_
 
 import cv2
 import numpy as np
 import sys
-import time
 
 from pynput import keyboard
 
@@ -107,6 +106,53 @@ def print_low_state():
     )
     # if you also want battery etc, you can look at msg.power_v / msg.power_a here
 
+uwb_state: UwbState_ = None
+uwb_was_active = 0
+
+def handle_uwb_state(msg: UwbState_):
+    global uwb_state, uwb_was_active
+    uwb_state = msg
+
+    if msg.buttons != 0 or msg.joystick[0] != 0 or msg.joystick[1] != 0:
+        uwb_was_active = 20  # keep active for 20 frames
+
+    if msg.buttons == 4: # M button
+        print("M button pressed")
+        disable_robot()
+
+
+
+from dataclasses import dataclass
+from typing import Sequence
+
+@dataclass
+class States:
+    gyroscope: Sequence[float]
+    accelerometer: Sequence[float]
+    rpy: Sequence[float]
+    temperature: float
+    battery_percent: float
+    battery_current: float
+    uwb_active: bool
+
+def get_states() -> States:
+    global low_state, uwb_state, uwb_was_active
+
+    uwb_active = uwb_was_active > 0
+    if uwb_active:
+        uwb_was_active -= 1
+    
+    return States(
+        gyroscope = [0, 0, 0] if low_state is None else low_state.imu_state.gyroscope,
+        accelerometer = [0, 0, 0] if low_state is None else low_state.imu_state.accelerometer,
+        rpy = [0, 0, 0] if low_state is None else low_state.imu_state.rpy,
+        temperature = 0 if low_state is None else low_state.imu_state.temperature,
+
+        battery_percent = 0.0 if low_state is None else low_state.bms_state.soc,
+        battery_current = 0.0 if low_state is None else low_state.bms_state.current / 1000.0,
+
+        uwb_active = uwb_active,
+    )
 
 from ai.ai import AIClient
 
@@ -130,11 +176,14 @@ if __name__ == "__main__":
     state_client.Init()
 
     # State subscriber
-    low_state_sub = ChannelSubscriber("rt/lowstate", LowState_)
-    low_state_sub.Init(low_state_handler, 10)
+    # low_state_sub = ChannelSubscriber("rt/lowstate", LowState_)
+    # low_state_sub.Init(low_state_handler, 10)
 
-    sub = ChannelSubscriber("rt/sportmodestate", SportModeState_)
-    sub.Init(handle_sport_state, 10)
+    # sub = ChannelSubscriber("rt/sportmodestate", SportModeState_)
+    # sub.Init(handle_sport_state, 10)
+
+    sub = ChannelSubscriber("rt/uwbstate", UwbState_)
+    sub.Init(handle_uwb_state, 10)
 
     ai_client = AIClient()
     frame = 0
@@ -145,19 +194,25 @@ if __name__ == "__main__":
     safe_mode = True
     following = False
 
+    def disable_robot():
+        global disabled
+
+        print(f"Please ensure the robot is safe and press Enter to re-enable")
+        disabled = True
+        sport_client.Damp()
+
+
     def on_press(key):
-        global disabled, safe_mode, following
+        global disabled, safe_mode, following, wait
 
         if key == keyboard.Key.space:
             print(f"Space key pressed, damping the robot")
-            print(f"Please ensure the robot is safe and press Enter to re-enable")
-            disabled = True
-            sport_client.Damp()
+            disable_robot()
 
         elif key == keyboard.Key.enter:
             print(f"Enter key pressed, enabling the robot")
             disabled = False
-            sport_client.BalanceStand()
+            wait = (1, "reset")
 
         elif key == keyboard.Key.ctrl:
             safe_mode = not safe_mode
@@ -174,6 +229,7 @@ if __name__ == "__main__":
 
     def reset_pose():
         # Sometimes the robot needs a bit of a nudge to get back to normal posture
+        sport_client.RecoveryStand()
         sport_client.BalanceStand()
         cv2.waitKey(1)
         sport_client.Euler(0, 0, 0)
@@ -208,12 +264,10 @@ if __name__ == "__main__":
         image = cv2.resize(image, (1280, 720))
 
         action, direction, image = ai_client.update(image)
-        print(f"Detected action: {action}, direction: {direction}")
+        state = get_states()
         
-        # code, info = state_client.CheckMode()
-        # print(f"Frame: {frame}, Action: {action}, wait: {wait}, Current motion mode: {info}, code: {code}")
-        # print_low_state()
-        # print_sport_state()
+        # print(f"Frame: {frame}, Action: {action}, wait: {wait}")
+
         frame += 1
 
         if disabled:
@@ -225,6 +279,9 @@ if __name__ == "__main__":
         if following:
             cv2.putText(image, "Following Mode ON", (50, 200), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 0), 3)
 
+        if state.uwb_active:
+            cv2.putText(image, "UWB Active", (50, 250), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 3)
+
         # Display image
         cv2.imshow(window_name, image)
 
@@ -232,7 +289,7 @@ if __name__ == "__main__":
         if action == "quit":
             break
 
-        if disabled:
+        if disabled or state.uwb_active:
             cv2.waitKey(1)
             continue
 
@@ -315,6 +372,13 @@ if __name__ == "__main__":
 
             continue
 
+        if following:
+            if not direction:
+                print("No direction detected, stopping movement")
+                continue
+
+            print(f"Following direction: {direction}")
+
         if action == "hand_heart" or action == "hand_heart2" or action == "a":
             cv2.waitKey(1)
             sport_client.Heart() # Blocking call
@@ -385,6 +449,10 @@ if __name__ == "__main__":
                 sport_client.Dance1()
 
         elif action == "middle_finger" or action == "r":
+            if safe_mode:
+                print("Safe mode is ON, skipping FrontPounce command")
+                continue
+
             cv2.waitKey(1)
             sport_client.FrontPounce()
 
@@ -400,7 +468,7 @@ if __name__ == "__main__":
             cv2.waitKey(1)
             sport_client.Stretch()
 
-        elif action != "no_gesture" and action != None:
+        elif action != None:
             print(f"Unknown action: {action}")
 
         else:

@@ -75,6 +75,9 @@ class AIClient:
         self.draw_instructions = True
         self.draw_action = True
 
+        self.active_pose_counts = [0] * len(self.model.names)
+
+
     def get_index_direction(self, landmarks, drawings):
         if not landmarks:
             return None
@@ -125,8 +128,8 @@ class AIClient:
                         (end_point[0] + 15 + label_size[0], end_point[1] - 5), (0, 0, 0), -1)
             cv.putText(drawings, label, (end_point[0] + 10, end_point[1] - 10), 
                     cv.FONT_HERSHEY_DUPLEX, 1, (255, 255, 255), 1, cv.LINE_4)
-            
-        return (x, y, z)
+
+        return (float(x), float(y), float(z))
 
 
     def run_landmarks(self, original, drawings):
@@ -178,12 +181,28 @@ class AIClient:
 
                 # frame = r.plot()
 
-        pose = None
-        if results and len(results[0]) > 0:
-            cls_id = int(results[0].boxes[0].cls[0])
-            pose = self.model.names.get(cls_id, str(cls_id))
+        # Get all recognized poses
+        current_poses = []
+        for id in range(len(results[0].boxes)):
+            current_poses.append(int(results[0].boxes[id].cls[0]))
 
-        return pose
+        # Remove non reaccuring poses from active counts
+        for pose in range(len(self.active_pose_counts)):
+            if not pose in current_poses:
+                self.active_pose_counts[pose] = 0
+
+        # Increase count for current poses
+        for pose in current_poses:
+            self.active_pose_counts[pose] += 1
+
+        active_poses = []
+        for pose in range(len(self.active_pose_counts)):
+            if self.active_pose_counts[pose] >= 5:  # require 5 consecutive frames
+                active_poses.append(self.model.names[pose])
+
+        # For now just return the first active pose
+        pose = active_poses[0] if len(active_poses) > 0 else None
+        return None if pose == "no_gesture" else pose
 
 
     # hand keypoints
