@@ -1,9 +1,7 @@
 #!/usr/bin/env python3.11
 
-from email.mime import base
 import time
 from collections import deque
-from unittest import result
 
 import cv2 as cv
 from ultralytics import YOLO
@@ -50,9 +48,6 @@ class AIClient:
 
         # Mediapipe Hands setup
         self.mp_hands = mp.solutions.hands
-        self.mp_draw = mp.solutions.drawing_utils
-        self.mp_styles = mp.solutions.drawing_styles
-
         self.hands = self.mp_hands.Hands(
             static_image_mode=False,
             max_num_hands=2,
@@ -60,6 +55,16 @@ class AIClient:
             min_detection_confidence=0.5,
             min_tracking_confidence=0.5,
         )
+
+        # Which connections to draw for hand landmarks
+        self.hand_connections = [
+            (0, 1), (1, 2), (2, 3), (3, 4),
+            (0, 5), (5, 6), (6, 7), (7, 8),
+            (5, 9), (9, 10), (10, 11), (11, 12),
+            (9, 13), (13, 14), (14, 15), (15, 16),
+            (13, 17), (17, 18), (18, 19), (19, 20),
+            (0, 17),
+        ]
 
         # FPS smoothing
         self.t0 = time.time()
@@ -78,19 +83,37 @@ class AIClient:
         self.active_pose_counts = [0] * len(self.model.names)
 
 
-    def get_index_direction(self, landmarks, drawings):
-        if not landmarks:
+    def draw_hand_landmarks(self, drawings, keypoints):
+        if drawings is None:
+            return
+
+        for start, end in self.hand_connections:
+            if start < len(keypoints) and end < len(keypoints):
+                x1, y1 = map(int, keypoints[start][:2])
+                x2, y2 = map(int, keypoints[end][:2])
+                cv.line(drawings, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+        for x, y, _ in keypoints:
+            cv.circle(drawings, (int(x), int(y)), 4, (0, 0, 255), -1)
+
+
+    def get_index_direction(self, landmarks, drawings, frame_shape, hand_width=None):
+        if not landmarks or frame_shape is None or len(frame_shape) < 2:
             return None
 
         INDEX_BASE = 5
         INDEX_TIP = 8
 
-        base = landmarks[0].landmark[INDEX_BASE]
-        tip = landmarks[0].landmark[INDEX_TIP]
+        keypoints = landmarks[0]
+        if len(keypoints) <= INDEX_TIP:
+            return None
 
-        x = tip.x - base.x
-        y = tip.y - base.y
-        z = tip.z - base.z
+        base_x, base_y, base_z = keypoints[INDEX_BASE]
+        tip_x, tip_y, tip_z = keypoints[INDEX_TIP]
+
+        x = tip_x - base_x
+        y = tip_y - base_y
+        z = tip_z - base_z
 
         direction_length = np.sqrt(x*x + y*y + z*z*2)  # Weight z more for depth
         if direction_length > 0:
@@ -114,9 +137,8 @@ class AIClient:
 
 
         if drawings is not None:
-            h, w, _ = drawings.shape
-            start_point = (int(tip.x * w), int(tip.y * h))
-            end_point = (int((tip.x + tip.x - base.x) * w), int((tip.y + tip.y - base.y) * h))
+            start_point = (int(tip_x), int(tip_y))
+            end_point = (int(tip_x + (tip_x - base_x)), int(tip_y + (tip_y - base_y)))
             
             # Draw main arrow
             cv.arrowedLine(drawings, start_point, end_point, (255, 0, 0), 3)
@@ -129,24 +151,50 @@ class AIClient:
             cv.putText(drawings, label, (end_point[0] + 10, end_point[1] - 10), 
                     cv.FONT_HERSHEY_DUPLEX, 1, (255, 255, 255), 1, cv.LINE_4)
 
-        return (float(x), float(y), float(z))
+        h, w = frame_shape[:2]
+        if w == 0 or h == 0:
+            return None
+
+        width_norm = None
+        if hand_width is not None and w > 0:
+            width_norm = float(hand_width) / float(w)
+
+        return ((float(x), float(y), float(z)), (float(tip_x / w), float(tip_y / h), width_norm))
 
 
-    def run_landmarks(self, original, drawings):
+    def run_landmarks(self, original, drawings, det):
         rgb = cv.cvtColor(original, cv.COLOR_BGR2RGB)
-        hands_result = self.hands.process(rgb)
 
-        if drawings is not None and hands_result.multi_hand_landmarks:
-            for hand_landmarks in hands_result.multi_hand_landmarks:
-                self.mp_draw.draw_landmarks(
-                    image=drawings,
-                    landmark_list=hand_landmarks,
-                    connections=self.mp_hands.HAND_CONNECTIONS,
-                    landmark_drawing_spec=self.mp_styles.get_default_hand_landmarks_style(),
-                    connection_drawing_spec=self.mp_styles.get_default_hand_connections_style(),
-                )
+        img_h, img_w = original.shape[:2]
+        x1, y1, x2, y2 = det["bbox"]
 
-        return hands_result.multi_hand_landmarks
+        x1 = max(0, min(int(x1), img_w))
+        x2 = max(0, min(int(x2), img_w))
+        y1 = max(0, min(int(y1), img_h))
+        y2 = max(0, min(int(y2), img_h))
+
+        if x2 <= x1 or y2 <= y1:
+            return None
+
+        crop = rgb[y1:y2, x1:x2]
+        if crop.size == 0:
+            return None
+
+        hands_result = self.hands.process(crop)
+        if not hands_result.multi_hand_landmarks:
+            return None
+
+        hand_landmarks = hands_result.multi_hand_landmarks[0]
+        keypoints = []
+        for lm in hand_landmarks.landmark:
+            abs_x = x1 + lm.x * (x2 - x1)
+            abs_y = y1 + lm.y * (y2 - y1)
+            keypoints.append((abs_x, abs_y, lm.z))
+
+        if drawings is not None:
+            self.draw_hand_landmarks(drawings, keypoints)
+
+        return keypoints
         
 
 
@@ -160,31 +208,53 @@ class AIClient:
             verbose=False
         )
 
-        # print("Handgrid Results:")
-        # print(results)
+        detections = []
+        best_direction = None
+        best_score = -1.0
 
-        if drawings is not None:
+        if results and len(results) > 0 and results[0].boxes is not None:
             for box in results[0].boxes:
                 cls_id = int(box.cls[0])
                 name = self.model.names.get(cls_id, str(cls_id))
                 score = float(box.conf[0])
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
-                
-                # Draw bounding box
-                cv.rectangle(drawings, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                
-                # Draw label with confidence (white on black, same style as footer)
-                label = f"{name} {score:.2f}"
-                label_size = cv.getTextSize(label, cv.FONT_HERSHEY_DUPLEX, 1, 1)[0]
-                cv.rectangle(drawings, (x1, y1 - label_size[1] - 10), (x1 + label_size[0], y1), (0, 0, 0), -1)
-                cv.putText(drawings, label, (x1, y1 - 5), cv.FONT_HERSHEY_DUPLEX, 1, (255, 255, 255), 1, cv.LINE_4)
 
-                # frame = r.plot()
+                det = {
+                    "cls": cls_id,
+                    "name": name,
+                    "score": score,
+                    "bbox": (x1, y1, x2, y2),
+                }
+                detections.append(det)
+                
+                if drawings is not None:
+                    # Draw bounding box
+                    cv.rectangle(drawings, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    
+                    # Draw label with confidence (white on black, same style as footer)
+                    label = f"{name} {score:.2f}"
+                    label_size = cv.getTextSize(label, cv.FONT_HERSHEY_DUPLEX, 1, 1)[0]
+                    cv.rectangle(drawings, (x1, y1 - label_size[1] - 10), (x1 + label_size[0], y1), (0, 0, 0), -1)
+                    cv.putText(drawings, label, (x1, y1 - 5), cv.FONT_HERSHEY_DUPLEX, 1, (255, 255, 255), 1, cv.LINE_4)
+
+                # Landmarks + direction for this detection
+                keypoints = self.run_landmarks(original, drawings if self.draw_landmark else None, det)
+                if keypoints:
+                    hand_width = det["bbox"][2] - det["bbox"][0]
+                    direction = self.get_index_direction(
+                        [keypoints],
+                        drawings if self.draw_hand_direction else None,
+                        original.shape,
+                        hand_width=hand_width,
+                    )
+                    if direction and score > best_score:
+                        best_direction = direction
+                        best_score = score
 
         # Get all recognized poses
         current_poses = []
-        for id in range(len(results[0].boxes)):
-            current_poses.append(int(results[0].boxes[id].cls[0]))
+        for det in detections:
+            current_poses.append(det["cls"])
 
         # Remove non reaccuring poses from active counts
         for pose in range(len(self.active_pose_counts)):
@@ -202,7 +272,9 @@ class AIClient:
 
         # For now just return the first active pose
         pose = active_poses[0] if len(active_poses) > 0 else None
-        return None if pose == "no_gesture" else pose
+        pose = None if pose == "no_gesture" else pose
+
+        return pose, best_direction
 
 
     # hand keypoints
@@ -249,14 +321,10 @@ class AIClient:
         # draw on a copy of the original frame
         drawings = original.copy()
 
-        # Landmarks
-        landmarks = self.run_landmarks(original, drawings if self.draw_landmark else None)
-        index = self.get_index_direction(landmarks, drawings if self.draw_hand_direction else None)
+        draw_ctx = drawings if (self.draw_handgrid or self.draw_landmark or self.draw_hand_direction) else None
 
-        # landmarks = add_footer_text(landmarks, ["[X]Mediapipe Hand Landmarks", "[  ]"])
-
-        # Handgrid detection
-        pose = self.run_handgrid(original, drawings if self.draw_handgrid else None)
+        # Handgrid detection first (now returns pose and best direction)
+        pose, index = self.run_handgrid(original, draw_ctx)
 
         """ Available Poses:
             grabbing, grip, holy, point, call, three3, 

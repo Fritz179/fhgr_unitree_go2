@@ -5,156 +5,17 @@ THIS_FILE = Path(__file__).resolve()
 ROOT = THIS_FILE.parents[1] 
 sys.path.insert(0, str(ROOT))
 
-from unitree_sdk2_python.unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscriber
-
+from unitree_sdk2_python.unitree_sdk2py.core.channel import ChannelFactoryInitialize
 from unitree_sdk2_python.unitree_sdk2py.go2.video.video_client import VideoClient
 from unitree_sdk2_python.unitree_sdk2py.go2.sport.sport_client import SportClient
 from unitree_sdk2_python.unitree_sdk2py.comm.motion_switcher.motion_switcher_client import MotionSwitcherClient
 
-from unitree_sdk2_python.unitree_sdk2py.idl.unitree_go.msg.dds_ import LowState_, IMUState_, BmsState_, SportModeState_, UwbState_
-
 import cv2
 import numpy as np
-import sys
-
 from pynput import keyboard
-
-def mode_to_str(mode: int) -> str:
-    # Mapping based on Go1/Go2 HighCmd docs (not official names, just handy labels)
-    return {
-        0: "idle",
-        1: "stand (force control)",
-        2: "walk (velocity)",
-        3: "walk (position/path)",
-        4: "walk (given path)",
-        5: "stand down",
-        6: "stand up",
-        7: "damping",
-        8: "recovery",
-        9: "backflip",
-        10: "jumpYaw",
-        11: "straightHand",
-        12: "dance1",
-        13: "dance2",
-    }.get(mode, f"unknown({mode})")
-
-
-def gait_to_str(gait: int) -> str:
-    return {
-        0: "idle",
-        1: "trot walk",
-        2: "trot run",
-        3: "stairs",
-        4: "trot obstacle",
-    }.get(gait, f"unknown({gait})")
-
-
-sport_state = None
-def handle_sport_state(msg: SportModeState_):
-    global sport_state
-    sport_state = msg
-
-def print_sport_state():
-    msg: SportModeState_ = sport_state
-    if msg is None:
-        return
-    
-    # Basic sanity / “ready” heuristic
-    ready_for_motion = (msg.error_code == 0) and (msg.mode in (1, 2, 3, 4, 6))
-    in_damping = (msg.mode == 7)
-
-    # Short line summary so you can tail it
-    print(
-        "State:\n"
-        f"  error={msg.error_code} "
-        f"  mode={mode_to_str(msg.mode)}, {msg.mode} "
-        f"  gait={gait_to_str(msg.gait_type)} "
-        f"  ready={ready_for_motion} "
-        f"  damping={in_damping} "
-    )
-
-low_state = None
-def low_state_handler(msg: LowState_):
-    global low_state
-    low_state = msg
-
-def print_low_state():
-    msg: LowState_ = low_state
-    if msg is None:
-        return
-
-    imu: IMUState_ = msg.imu_state
-    bms: BmsState_ = msg.bms_state
-    # mode: SportModeState_ = msg.sport_mode_state
-
-    gyro = imu.gyroscope
-    acc = imu.accelerometer
-    rpy = imu.rpy
-    temp = imu.temperature
-
-    battery_percent = bms.soc
-    battery_current = bms.current / 1000.0  # convert to A   
-
-    print(
-        "IMU:\n"
-        f"  gyroscope    = [{gyro[0]: .4f}, {gyro[1]: .4f}, {gyro[2]: .4f}]  # rad/s\n"
-        f"  accelerometer= [{acc[0]: .4f}, {acc[1]: .4f}, {acc[2]: .4f}]  # m/s^2\n"
-        f"  rpy          = [{rpy[0]: .4f}, {rpy[1]: .4f}, {rpy[2]: .4f}]  # rad\n"
-        f"  temperature  = {int(temp)} °C\n"
-        ""
-        f"Battery:       = {battery_percent:.1f}% / {battery_current:.1f}A"
-    )
-    # if you also want battery etc, you can look at msg.power_v / msg.power_a here
-
-uwb_state: UwbState_ = None
-uwb_was_active = 0
-
-def handle_uwb_state(msg: UwbState_):
-    global uwb_state, uwb_was_active
-    uwb_state = msg
-
-    if msg.buttons != 0 or msg.joystick[0] != 0 or msg.joystick[1] != 0:
-        uwb_was_active = 20  # keep active for 20 frames
-
-    if msg.buttons == 4: # M button
-        print("M button pressed")
-        disable_robot()
-
-
-
-from dataclasses import dataclass
-from typing import Sequence
-
-@dataclass
-class States:
-    gyroscope: Sequence[float]
-    accelerometer: Sequence[float]
-    rpy: Sequence[float]
-    temperature: float
-    battery_percent: float
-    battery_current: float
-    uwb_active: bool
-
-def get_states() -> States:
-    global low_state, uwb_state, uwb_was_active
-
-    uwb_active = uwb_was_active > 0
-    if uwb_active:
-        uwb_was_active -= 1
-    
-    return States(
-        gyroscope = [0, 0, 0] if low_state is None else low_state.imu_state.gyroscope,
-        accelerometer = [0, 0, 0] if low_state is None else low_state.imu_state.accelerometer,
-        rpy = [0, 0, 0] if low_state is None else low_state.imu_state.rpy,
-        temperature = 0 if low_state is None else low_state.imu_state.temperature,
-
-        battery_percent = 0.0 if low_state is None else low_state.bms_state.soc,
-        battery_current = 0.0 if low_state is None else low_state.bms_state.current / 1000.0,
-
-        uwb_active = uwb_active,
-    )
-
 from ai.ai import AIClient
+
+from messages import get_state, register_messages
 
 if __name__ == "__main__":
     # ChannelFactoryInitialize(0, "wlo1")
@@ -175,24 +36,16 @@ if __name__ == "__main__":
     state_client.SetTimeout(5.0)
     state_client.Init()
 
-    # State subscriber
-    # low_state_sub = ChannelSubscriber("rt/lowstate", LowState_)
-    # low_state_sub.Init(low_state_handler, 10)
-
-    # sub = ChannelSubscriber("rt/sportmodestate", SportModeState_)
-    # sub.Init(handle_sport_state, 10)
-
-    sub = ChannelSubscriber("rt/uwbstate", UwbState_)
-    sub.Init(handle_uwb_state, 10)
-
     ai_client = AIClient()
-    frame = 0
 
+    # App state, wait = (frames to wait, action after wait)
     wait = (20, "reset")
 
     disabled = False
     safe_mode = True
     following = False
+    following_state = None
+    frame = 0
 
     def disable_robot():
         global disabled
@@ -201,6 +54,7 @@ if __name__ == "__main__":
         disabled = True
         sport_client.Damp()
 
+    register_messages(disable_robot)
 
     def on_press(key):
         global disabled, safe_mode, following, wait
@@ -264,8 +118,8 @@ if __name__ == "__main__":
         image = cv2.resize(image, (1280, 720))
 
         action, direction, image = ai_client.update(image)
-        state = get_states()
-        
+        state = get_state()
+
         # print(f"Frame: {frame}, Action: {action}, wait: {wait}")
 
         frame += 1
@@ -347,7 +201,7 @@ if __name__ == "__main__":
             wait = (wait[0]-1, wait[1])
             continue
 
-        if wait[0] == 0 and wait[1] != "done":
+        if wait[0] == 0 and wait[1] != "done" and wait[1] != "following":
             cv2.waitKey(1)
 
             action = wait[1]
@@ -370,14 +224,82 @@ if __name__ == "__main__":
                 reset_pose()
                 sport_client.Euler(0, -0.3, 0)
 
+
             continue
 
+
         if following:
+            if wait[1] != "following":
+                sport_client.ClassicWalk(True)
+                following_state = {"phase": "move", "count": 0}
+                wait = (0, "following")
+
+            if following_state is None:
+                following_state = {"phase": "move", "count": 0}
+
             if not direction:
-                print("No direction detected, stopping movement")
+                print("No direction detected!!!!")
+                if following_state["phase"] == "move":
+                    sport_client.StopMove()
+                    following_state = {"phase": "wait", "count": 0}
                 continue
 
-            print(f"Following direction: {direction}")
+            (x, y, z), (px, py, width_ratio) = direction
+
+            def clamp_speed(v, limit=0.5):
+                return max(-limit, min(limit, v))
+
+            y -= 60  # compensate for small downward bias
+
+            YAWGAIN = 2.5
+            YAW_DEADBAND = 0.05
+
+            hand_ratio = width_ratio if width_ratio is not None else None
+
+            forward_from_pitch = 0.0
+            forward_from_dist = 0.0
+            if hand_ratio is not None:
+                target_ratio = 0.15
+                dist_err = target_ratio - hand_ratio
+                forward_from_dist = clamp_speed(dist_err * 2.0)
+
+            vx = clamp_speed(forward_from_pitch + forward_from_dist)
+            vy = clamp_speed(-x / 40.0)
+
+            center_err = px - 0.5
+            if abs(center_err) < YAW_DEADBAND:
+                center_err = 0.0
+            vyaw = clamp_speed(-center_err * YAWGAIN)
+
+            ratio_text = f"{hand_ratio:.3f}" if hand_ratio is not None else "none"
+
+            print(
+                f"follow: x={x:.2f}, y={y:.2f}, px={px:.2f}, size={ratio_text} -> "
+                f"vx={vx:.2f} (pitch {forward_from_pitch:.2f} + dist {forward_from_dist:.2f}), "
+                f"vy={vy:.2f}, vyaw={vyaw:.2f}, phase={following_state['phase']}, count={following_state['count']}"
+            )
+
+            if following_state["phase"] == "move":
+                sport_client.Move(vx, vy, vyaw)
+                following_state["count"] += 1
+                if following_state["count"] >= 5:
+                    sport_client.StopMove()
+                    following_state = {"phase": "wait", "count": 0}
+            else:  # wait phase
+                following_state["count"] += 1
+                if following_state["count"] >= 5:
+                    following_state = {"phase": "move", "count": 0}
+
+            continue
+
+        elif wait[1] == "following":
+            print("Exiting following mode, stopping movement")
+            sport_client.StopMove()
+            wait = (10, "reset")
+            following_state = None
+            continue
+        else:
+            following_state = None
 
         if action == "hand_heart" or action == "hand_heart2" or action == "a":
             cv2.waitKey(1)
@@ -410,29 +332,26 @@ if __name__ == "__main__":
         elif action == "like" or action == "j":
             if safe_mode:
                 print("Safe mode is ON, skipping WalkUpright command")
-                continue
-
-            cv2.waitKey(1)
-            sport_client.WalkUpright(True)
-            wait = (50, "walk_upright_off")
+            else:
+                cv2.waitKey(1)
+                sport_client.WalkUpright(True)
+                wait = (50, "walk_upright_off")
 
         elif action == "dislike" or action == "k":
             if safe_mode:
                 print("Safe mode is ON, skipping HandStand command")
-                continue
-
-            cv2.waitKey(1)
-            sport_client.HandStand(True)
-            wait = (50, "hand_stand_off")
+            else:
+                cv2.waitKey(1)
+                sport_client.HandStand(True)
+                wait = (50, "hand_stand_off")
 
         elif action == "three_gun" or action == "l":
             if safe_mode:
                 print("Safe mode is ON, skipping LeftFlip command")
-                continue
-
-            cv2.waitKey(1)
-            sport_client.LeftFlip()  # Blocking call
-            wait = (20, "reset")
+            else:
+                cv2.waitKey(1)
+                sport_client.LeftFlip()  # Blocking call
+                wait = (20, "reset")
 
 
         elif action == "rock" or action == "w" or action == "e":
@@ -451,18 +370,16 @@ if __name__ == "__main__":
         elif action == "middle_finger" or action == "r":
             if safe_mode:
                 print("Safe mode is ON, skipping FrontPounce command")
-                continue
-
-            cv2.waitKey(1)
-            sport_client.FrontPounce()
+            else:
+                cv2.waitKey(1)
+                sport_client.FrontPounce()
 
         elif action == "peace_inverted" or action == "t":
             if safe_mode:
                 print("Safe mode is ON, skipping FrontJump command")
-                continue
-
-            cv2.waitKey(1)
-            sport_client.FrontJump()
+            else:
+                cv2.waitKey(1)
+                sport_client.FrontJump()
 
         elif action == "grabbing" or action == "z":
             cv2.waitKey(1)
@@ -471,20 +388,15 @@ if __name__ == "__main__":
         elif action != None:
             print(f"Unknown action: {action}")
 
-        else:
-            cv2.waitKey(1)
+        if wait[0] == 0 and action == None:
+            # Look slightly up when idle
             sport_client.Euler(0, -0.3, 0)
-            continue
 
     listener.stop()
     listener.join()
 
     cv2.destroyWindow(window_name)
 
-"""
-TODO:
-- same command has to be held for some time to be executed
-- hold command that is being exeuted
-- show camera while preset moves?
-- cleanup code
-"""
+    # TODO: Hand following
+    # TODO: Better UI
+    # TODO: Wifi?
