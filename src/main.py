@@ -17,7 +17,19 @@ from ai.ai import AIClient
 
 from messages import get_state, register_messages
 
+def draw_text(image, text, x, y, color=(255, 255, 255), background_color=(0, 0, 0)):
+    label_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_DUPLEX, 1, 1)[0]
+    cv2.rectangle(image, (x, y - label_size[1] - 10), (x + label_size[0], y), background_color, -1)
+    cv2.putText(image, text, (x, y - 5), cv2.FONT_HERSHEY_DUPLEX, 1, color, 1, cv2.LINE_4)
+
 if __name__ == "__main__":
+    ALLOW_UNSAFE = "--allow-unsafe" in sys.argv or "-u" in sys.argv
+
+    if ALLOW_UNSAFE:
+        print("WARNING: Unsafe mode allowed. Be careful!")
+    else:
+        print("Safe mode disallowed. Use --allow-unsafe or -u to allow it.")
+
     # ChannelFactoryInitialize(0, "wlo1")
     ChannelFactoryInitialize(0)
 
@@ -68,12 +80,12 @@ if __name__ == "__main__":
             disabled = False
             wait = (1, "reset")
 
-        elif key == keyboard.Key.ctrl:
+        elif key == keyboard.Key.ctrl and ALLOW_UNSAFE:
             safe_mode = not safe_mode
             following = False
             print(f"Ctrl key pressed, toggling safe mode (currently {'ON' if safe_mode else 'OFF'})")
 
-        elif key == keyboard.Key.shift:
+        elif key == keyboard.Key.shift and ALLOW_UNSAFE:
             if safe_mode:
                 print("Safe mode is ON, cannot enable following mode")
                 return
@@ -125,16 +137,27 @@ if __name__ == "__main__":
         frame += 1
 
         if disabled:
-            cv2.putText(image, "Robot Disabled - Press Enter to Enable", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 3)
+            # cv2.putText(image, "Robot Disabled - Press Enter to Enable", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 3)
+            draw_text(image, "Robot Disabled - Press Enter to Enable", 50, 100, (0, 0, 255))
 
-        if not safe_mode:
-            cv2.putText(image, "Safe Mode OFF", (50, 150), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 3)
+        if not safe_mode and ALLOW_UNSAFE:
+            # cv2.putText(image, "Safe Mode OFF", (50, 150), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 3)
+            draw_text(image, "Safe Mode OFF", 50, 150, (0, 0, 255))
 
         if following:
-            cv2.putText(image, "Following Mode ON", (50, 200), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 0), 3)
+            # cv2.putText(image, "Following Mode ON", (50, 200), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 0), 3)
+            draw_text(image, "Following Mode ON", 50, 200, (0, 255, 0))
 
         if state.uwb_active:
-            cv2.putText(image, "UWB Active", (50, 250), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 3)
+            # cv2.putText(image, "UWB Active", (50, 250), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 3)
+            draw_text(image, "UWB Active", 50, 250, (0, 0, 255))
+
+        if state.battery_percent:
+            draw_text(image, f"Battery: {state.battery_percent}%, {state.battery_current:.2f}A", 900, 30, (255, 255, 0))
+
+        # set fullscreen
+        # cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+        # cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
         # Display image
         cv2.imshow(window_name, image)
@@ -207,12 +230,16 @@ if __name__ == "__main__":
             action = wait[1]
             wait = (0, "done")
             print(f"Finished waiting for action: {action}")
-            print(f"Finished waiting for action: {action}")
             
+            if action == "start_sit":
+                sport_client.Sit()
+                wait = (50, "rise_sit")  # after 50 frames, rise back up
             if action == "rise_sit":
+                wait = (10, "reset")
                 sport_client.RiseSit()
             elif action == "stand_up":
                 sport_client.StandUp()
+                wait = (10, "reset")
             elif action == "walk_upright_off":
                 sport_client.WalkUpright(False)
                 wait = (10, "reset")
@@ -231,20 +258,27 @@ if __name__ == "__main__":
         if following:
             if wait[1] != "following":
                 sport_client.ClassicWalk(True)
-                following_state = {"phase": "move", "count": 0}
-                wait = (0, "following")
+                following_state = (5, "stop")
 
-            if following_state is None:
-                following_state = {"phase": "move", "count": 0}
+            wait = (0, "following")
+
+            print(f"Following state: {following_state}")
+
+            if following_state[0] > 0:
+                following_state = (following_state[0]-1, following_state[1])
+                continue
+
+            if following_state[1] == "moving":
+                sport_client.StopMove()
+                following_state = (10, "stop")
+                continue
 
             if not direction:
                 print("No direction detected!!!!")
-                if following_state["phase"] == "move":
-                    sport_client.StopMove()
-                    following_state = {"phase": "wait", "count": 0}
                 continue
 
-            (x, y, z), (px, py, width_ratio) = direction
+            # Calculate next movement
+            (x, y, z), (px, py, hand_ratio) = direction
 
             def clamp_speed(v, limit=0.5):
                 return max(-limit, min(limit, v))
@@ -254,18 +288,20 @@ if __name__ == "__main__":
             YAWGAIN = 2.5
             YAW_DEADBAND = 0.05
 
-            hand_ratio = width_ratio if width_ratio is not None else None
-
+            # Forward/back only from distance estimate
             forward_from_pitch = 0.0
             forward_from_dist = 0.0
             if hand_ratio is not None:
-                target_ratio = 0.15
+                target_ratio = 0.1
                 dist_err = target_ratio - hand_ratio
                 forward_from_dist = clamp_speed(dist_err * 2.0)
 
             vx = clamp_speed(forward_from_pitch + forward_from_dist)
+
+            # Strafe from finger pointing left/right
             vy = clamp_speed(-x / 40.0)
 
+            # Yaw from pixel center offset only
             center_err = px - 0.5
             if abs(center_err) < YAW_DEADBAND:
                 center_err = 0.0
@@ -276,19 +312,11 @@ if __name__ == "__main__":
             print(
                 f"follow: x={x:.2f}, y={y:.2f}, px={px:.2f}, size={ratio_text} -> "
                 f"vx={vx:.2f} (pitch {forward_from_pitch:.2f} + dist {forward_from_dist:.2f}), "
-                f"vy={vy:.2f}, vyaw={vyaw:.2f}, phase={following_state['phase']}, count={following_state['count']}"
+                f"vy={vy:.2f}, vyaw={vyaw:.2f}"
             )
 
-            if following_state["phase"] == "move":
-                sport_client.Move(vx, vy, vyaw)
-                following_state["count"] += 1
-                if following_state["count"] >= 5:
-                    sport_client.StopMove()
-                    following_state = {"phase": "wait", "count": 0}
-            else:  # wait phase
-                following_state["count"] += 1
-                if following_state["count"] >= 5:
-                    following_state = {"phase": "move", "count": 0}
+            sport_client.Move(vx, vy, vyaw)
+            following_state = (15, "moving")
 
             continue
 
@@ -296,10 +324,8 @@ if __name__ == "__main__":
             print("Exiting following mode, stopping movement")
             sport_client.StopMove()
             wait = (10, "reset")
-            following_state = None
+            following_state = (0, "stop")
             continue
-        else:
-            following_state = None
 
         if action == "hand_heart" or action == "hand_heart2" or action == "a":
             cv2.waitKey(1)
@@ -320,17 +346,20 @@ if __name__ == "__main__":
             wait = (50, "stand_up")  # after 50 frames, stand back up
 
         elif action == "fist" or action == "g":
+            print("Sit command received")
             cv2.waitKey(1)
-            sport_client.Sit()
+            sport_client.BalanceStand()
+            sport_client.Euler(0, 0, 0)
 
-            wait = (50, "rise_sit")  # after 50 frames, rise back up
+            wait = (5, "start_sit")  # after 10 frames, sit
 
         elif action == "peace" or action == "h":
             cv2.waitKey(1)
             sport_client.Content()  # Blocking call
 
         elif action == "like" or action == "j":
-            if safe_mode:
+            if safe_mode or not ALLOW_UNSAFE:
+                sport_client.Euler(0, -0.3, 0)
                 print("Safe mode is ON, skipping WalkUpright command")
             else:
                 cv2.waitKey(1)
@@ -338,7 +367,8 @@ if __name__ == "__main__":
                 wait = (50, "walk_upright_off")
 
         elif action == "dislike" or action == "k":
-            if safe_mode:
+            if safe_mode or not ALLOW_UNSAFE:
+                sport_client.Euler(0, -0.3, 0)
                 print("Safe mode is ON, skipping HandStand command")
             else:
                 cv2.waitKey(1)
@@ -346,7 +376,8 @@ if __name__ == "__main__":
                 wait = (50, "hand_stand_off")
 
         elif action == "three_gun" or action == "l":
-            if safe_mode:
+            if safe_mode or not ALLOW_UNSAFE:
+                sport_client.Euler(0, -0.3, 0)
                 print("Safe mode is ON, skipping LeftFlip command")
             else:
                 cv2.waitKey(1)
@@ -355,27 +386,37 @@ if __name__ == "__main__":
 
 
         elif action == "rock" or action == "w" or action == "e":
-            cv2.waitKey(1)
-
-            if action == "w":
-                sport_client.Dance1()
-            elif action == "e":
-                sport_client.Dance2()
-
-            elif np.random.rand() < 0.5:
-                sport_client.Dance2()
+            if safe_mode or not ALLOW_UNSAFE:
+                sport_client.Euler(0, -0.3, 0)
+                print("Safe mode is ON, skipping LeftFlip command")
             else:
-                sport_client.Dance1()
+                cv2.waitKey(1)
+
+                if action == "w":
+                    sport_client.Dance1()
+                elif action == "e":
+                    sport_client.Dance2()
+
+                elif np.random.rand() < 0.5:
+                    sport_client.Dance2()
+                else:
+                    sport_client.Dance1()
 
         elif action == "middle_finger" or action == "r":
-            if safe_mode:
+            if safe_mode or not ALLOW_UNSAFE:
+                sport_client.Euler(0, -0.3, 0)
                 print("Safe mode is ON, skipping FrontPounce command")
             else:
                 cv2.waitKey(1)
-                sport_client.FrontPounce()
+                # Pounce disabled as it is quite destructive
+                # sport_client.FrontPounce()
+
+                sport_client.Euler(0, 0.4, 0) # Look sadly down
+                wait = (10, "reset")
 
         elif action == "peace_inverted" or action == "t":
-            if safe_mode:
+            if safe_mode or not ALLOW_UNSAFE:
+                sport_client.Euler(0, -0.3, 0)
                 print("Safe mode is ON, skipping FrontJump command")
             else:
                 cv2.waitKey(1)
@@ -397,6 +438,4 @@ if __name__ == "__main__":
 
     cv2.destroyWindow(window_name)
 
-    # TODO: Hand following
-    # TODO: Better UI
     # TODO: Wifi?

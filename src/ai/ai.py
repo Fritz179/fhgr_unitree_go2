@@ -97,14 +97,13 @@ class AIClient:
             cv.circle(drawings, (int(x), int(y)), 4, (0, 0, 255), -1)
 
 
-    def get_index_direction(self, landmarks, drawings, frame_shape, hand_width=None):
-        if not landmarks or frame_shape is None or len(frame_shape) < 2:
+    def get_index_direction(self, keypoints, drawings, frame_shape, hand_width):
+        if not keypoints or frame_shape is None or len(frame_shape) < 2:
             return None
 
         INDEX_BASE = 5
         INDEX_TIP = 8
 
-        keypoints = landmarks[0]
         if len(keypoints) <= INDEX_TIP:
             return None
 
@@ -155,18 +154,14 @@ class AIClient:
         if w == 0 or h == 0:
             return None
 
-        width_norm = None
-        if hand_width is not None and w > 0:
-            width_norm = float(hand_width) / float(w)
-
-        return ((float(x), float(y), float(z)), (float(tip_x / w), float(tip_y / h), width_norm))
+        return ((float(x), float(y), float(z)), (float(tip_x / w), float(tip_y / h), float(hand_width / w)))
 
 
-    def run_landmarks(self, original, drawings, det):
+    def run_landmarks(self, original, drawings, box):
         rgb = cv.cvtColor(original, cv.COLOR_BGR2RGB)
 
         img_h, img_w = original.shape[:2]
-        x1, y1, x2, y2 = det["bbox"]
+        x1, y1, x2, y2 = box
 
         x1 = max(0, min(int(x1), img_w))
         x2 = max(0, min(int(x2), img_w))
@@ -219,13 +214,7 @@ class AIClient:
                 score = float(box.conf[0])
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
 
-                det = {
-                    "cls": cls_id,
-                    "name": name,
-                    "score": score,
-                    "bbox": (x1, y1, x2, y2),
-                }
-                detections.append(det)
+                detections.append(cls_id)
                 
                 if drawings is not None:
                     # Draw bounding box
@@ -237,24 +226,24 @@ class AIClient:
                     cv.rectangle(drawings, (x1, y1 - label_size[1] - 10), (x1 + label_size[0], y1), (0, 0, 0), -1)
                     cv.putText(drawings, label, (x1, y1 - 5), cv.FONT_HERSHEY_DUPLEX, 1, (255, 255, 255), 1, cv.LINE_4)
 
-                # Landmarks + direction for this detection
-                keypoints = self.run_landmarks(original, drawings if self.draw_landmark else None, det)
+                keypoints = self.run_landmarks(original, drawings if self.draw_landmark else None, (x1, y1, x2, y2))
                 if keypoints:
-                    hand_width = det["bbox"][2] - det["bbox"][0]
+                    hand_width = x2 - x1
                     direction = self.get_index_direction(
-                        [keypoints],
+                        keypoints,
                         drawings if self.draw_hand_direction else None,
                         original.shape,
-                        hand_width=hand_width,
+                        hand_width
                     )
+
                     if direction and score > best_score:
                         best_direction = direction
                         best_score = score
 
         # Get all recognized poses
         current_poses = []
-        for det in detections:
-            current_poses.append(det["cls"])
+        for cls_id in detections:
+            current_poses.append(cls_id)
 
         # Remove non reaccuring poses from active counts
         for pose in range(len(self.active_pose_counts)):
@@ -321,10 +310,8 @@ class AIClient:
         # draw on a copy of the original frame
         drawings = original.copy()
 
-        draw_ctx = drawings if (self.draw_handgrid or self.draw_landmark or self.draw_hand_direction) else None
-
-        # Handgrid detection first (now returns pose and best direction)
-        pose, index = self.run_handgrid(original, draw_ctx)
+        # Handgrid detection first (returns pose and best direction incl. width)
+        pose, index = self.run_handgrid(original, drawings if (self.draw_handgrid or self.draw_landmark or self.draw_hand_direction) else None)
 
         """ Available Poses:
             grabbing, grip, holy, point, call, three3, 
